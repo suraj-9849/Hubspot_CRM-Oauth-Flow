@@ -15,7 +15,7 @@ export class HubspotAuthController {
         .json({ error: 'Missing HubSpot OAuth configuration.' });
     }
 
-    const scope = 'oauth crm.companies.read';
+    const scope = 'oauth crm.objects.companies.read';
     const authorizationUrl = `https://app.hubspot.com/oauth/authorize?client_id=${this.clientId}&redirect_uri=${encodeURIComponent(
       this.redirectUri,
     )}&scope=${encodeURIComponent(scope)}`;
