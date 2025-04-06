@@ -12,6 +12,7 @@ import axios from 'axios';
 import { CreateContactDto } from './dto/CreateContact.dto';
 import { CreateCompanyDto } from './dto/CreateCompany.dto';
 import { CreateMeetingDto } from './dto/CreateMeeting.dto';
+import { CreateDealDto } from './dto/CreateDeal.dto';
 
 interface TokenData {
   accessToken: string;
@@ -35,7 +36,7 @@ export class HubspotAuthController {
         .json({ error: 'Missing HubSpot OAuth configuration.' });
     }
     const scope =
-      'oauth crm.objects.contacts.write crm.objects.contacts.read scheduler.meetings.meeting-link.read crm.objects.companies.write crm.objects.companies.read';
+      'oauth crm.objects.contacts.write crm.objects.contacts.read crm.objects.companies.write crm.objects.companies.read crm.objects.deals.write crm.objects.deals.read scheduler.meetings.meeting-link.read';
     const authorizationUrl = `https://app.hubspot.com/oauth/authorize?client_id=${this.clientId}&redirect_uri=${encodeURIComponent(
       this.redirectUri,
     )}&scope=${encodeURIComponent(scope)}`;
@@ -70,7 +71,7 @@ export class HubspotAuthController {
       );
 
       const { access_token, refresh_token, expires_in } = tokenResponse.data;
-      const expirationTimestamp = Date.now() + expires_in * 1000;
+      const expirationTimestamp = Date.now() + expires_in * 3000;
       tokenData = {
         accessToken: access_token,
         refreshToken: refresh_token,
@@ -200,7 +201,7 @@ export class HubspotAuthController {
         .json(error.response?.data || { error: 'Failed to create company.' });
     }
   }
-
+  
   @Post('store-meeting')
   async storeMeeting(
     @Body() meetingData: CreateMeetingDto,
@@ -208,6 +209,16 @@ export class HubspotAuthController {
   ) {
     try {
       const validToken = await this.getValidAccessToken();
+      const startTime =
+        typeof meetingData.startTime === 'string'
+          ? new Date(meetingData.startTime).getTime()
+          : meetingData.startTime;
+
+      const endTime =
+        typeof meetingData.endTime === 'string'
+          ? new Date(meetingData.endTime).getTime()
+          : meetingData.endTime;
+
       const payload = {
         engagement: {
           active: true,
@@ -215,31 +226,24 @@ export class HubspotAuthController {
           timestamp: Date.now(),
         },
         associations: {
-          ...(meetingData.buyerContactId || meetingData.sellerContactId
-            ? {
-                contactIds: [
-                  meetingData.buyerContactId,
-                  meetingData.sellerContactId,
-                ].filter(Boolean),
-              }
-            : {}),
-          ...(meetingData.buyerCompanyId || meetingData.sellerCompanyId
-            ? {
-                companyIds: [
-                  meetingData.buyerCompanyId,
-                  meetingData.sellerCompanyId,
-                ].filter(Boolean),
-              }
-            : {}),
+          contactIds: [
+            meetingData.buyerContactId,
+            meetingData.sellerContactId,
+          ].filter(Boolean),
+          companyIds: [
+            meetingData.buyerCompanyId,
+            meetingData.sellerCompanyId,
+          ].filter(Boolean),
         },
         metadata: {
           title: meetingData.title,
           body: meetingData.description,
-          startTime: meetingData.startTime,
-          endTime: meetingData.endTime,
+          startTime: startTime,
+          endTime: endTime,
           status: 'SCHEDULED',
         },
       };
+
       const response = await axios.post(
         'https://api.hubapi.com/engagements/v1/engagements',
         payload,
@@ -256,16 +260,219 @@ export class HubspotAuthController {
         'Store meeting error:',
         error.response?.data || error.message,
       );
+      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json(
+        error.response?.data || {
+          error: 'Failed to store meeting in HubSpot',
+        },
+      );
+    }
+  }
+  @Post('create-deal')
+  async createDeal(@Body() dealData: CreateDealDto, @Res() res: Response) {
+    try {
+      const validToken = await this.getValidAccessToken();
+
+      let closeDate = dealData.closeDate;
+      if (typeof closeDate === 'string' && !closeDate.match(/^\d+$/)) {
+        closeDate = new Date(closeDate).getTime().toString();
+      }
+
+      const payload = {
+        properties: {
+          dealname: dealData.dealName,
+          amount: dealData.amount.toString(),
+          dealstage: dealData.dealStage,
+          pipeline: dealData.pipeline,
+          closedate: closeDate,
+        },
+        associations: [] as any[],
+      };
+
+      if (dealData.contactId) {
+        payload.associations.push({
+          to: { id: dealData.contactId },
+          types: [
+            {
+              associationCategory: 'HUBSPOT_DEFINED',
+              associationTypeId: 3, 
+            },
+          ],
+        });
+      }
+
+      if (dealData.companyId) {
+        payload.associations.push({
+          to: { id: dealData.companyId },
+          types: [
+            {
+              associationCategory: 'HUBSPOT_DEFINED',
+              associationTypeId: 5, 
+            },
+          ],
+        });
+      }
+
+      console.log('Deal payload:', JSON.stringify(payload, null, 2));
+
+      const response = await axios.post(
+        'https://api.hubapi.com/crm/v3/objects/deals',
+        payload,
+        {
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+      return res.json(response.data);
+    } catch (error: any) {
+      console.error(
+        'Create deal error:',
+        error.response?.data || error.message,
+      );
       return res
         .status(HttpStatus.INTERNAL_SERVER_ERROR)
-        .json(
-          error.response?.data || {
-            error: 'Failed to store meeting in HubSpot',
-          },
-        );
+        .json(error.response?.data || { error: 'Failed to create deal.' });
     }
   }
 
+  @Post('batch/create-tasks')
+  async createTask(@Body() taskData: any, @Res() res: Response) {
+    try {
+      const validToken = await this.getValidAccessToken();
+      
+      const payload = {
+        engagement: {
+          active: true,
+          type: 'TASK',
+          timestamp: Date.now(),
+        },
+        associations: {
+          contactIds: taskData.contactIds || [],
+          companyIds: taskData.companyIds || [],
+          dealIds: taskData.dealIds || [],
+        },
+        metadata: {
+          body: taskData.body,
+          subject: taskData.subject,
+          status: 'NOT_STARTED',
+          dueDate: taskData.dueDate ? new Date(taskData.dueDate).getTime() : null,
+        },
+      };
+  
+      const response = await axios.post(
+        'https://api.hubapi.com/engagements/v1/engagements',
+        payload,
+        {
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      return res.json(response.data);
+    } catch (error: any) {
+      console.error(
+        'Create task error:',
+        error.response?.data || error.message,
+      );
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .json(error.response?.data || { error: 'Failed to create task' });
+    }
+  }
+  
+  @Post('batch/create-note')
+  async createNote(@Body() noteData: any, @Res() res: Response) {
+    try {
+      const validToken = await this.getValidAccessToken();
+      
+      const payload = {
+        engagement: {
+          active: true,
+          type: 'NOTE',
+          timestamp: Date.now(),
+        },
+        associations: {
+          contactIds: noteData.contactIds || [],
+          companyIds: noteData.companyIds || [],
+          dealIds: noteData.dealIds || [],
+        },
+        metadata: {
+          body: noteData.body,
+        },
+      };
+  
+      const response = await axios.post(
+        'https://api.hubapi.com/engagements/v1/engagements',
+        payload,
+        {
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      return res.json(response.data);
+    } catch (error: any) {
+      console.error(
+        'Create note error:',
+        error.response?.data || error.message,
+      );
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .json(error.response?.data || { error: 'Failed to create note' });
+    }
+  }
+  
+  @Post('batch/create-emails')
+  async createEmail(@Body() emailData: any, @Res() res: Response) {
+    try {
+      const validToken = await this.getValidAccessToken();
+      
+      const payload = {
+        engagement: {
+          active: true,
+          type: 'EMAIL',
+          timestamp: Date.now(),
+        },
+        associations: {
+          contactIds: emailData.contactIds || [],
+          companyIds: emailData.companyIds || [],
+          dealIds: emailData.dealIds || [],
+        },
+        metadata: {
+          from: { email: emailData.fromEmail || 'babu@gmail.com' },
+          to: emailData.toEmails || [],
+          cc: emailData.ccEmails || [],
+          bcc: emailData.bccEmails || [],
+          subject: emailData.subject,
+          html: emailData.body,
+          text: emailData.body,
+        },
+      };
+  
+      const response = await axios.post(
+        'https://api.hubapi.com/engagements/v1/engagements',
+        payload,
+        {
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      return res.json(response.data);
+    } catch (error: any) {
+      console.error(
+        'Create email error:',
+        error.response?.data || error.message,
+      );
+      return res
+        .status(HttpStatus.INTERNAL_SERVER_ERROR)
+        .json(error.response?.data || { error: 'Failed to create email' });
+    }
+  }
   @Get('force-refresh')
   async forceRefresh(@Res() res: Response) {
     try {
